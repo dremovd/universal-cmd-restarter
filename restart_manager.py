@@ -8,8 +8,13 @@ import select
 import os
 import psutil
 from datetime import datetime, timedelta
+import fcntl
 
 stop_flag = threading.Event()
+
+def set_nonblocking(fd):
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
 def terminate_process(process, worker_id):
     if process is None:
@@ -20,12 +25,21 @@ def terminate_process(process, worker_id):
         parent = psutil.Process(process.pid)
         children = parent.children(recursive=True)
         
+        # Attempt to read any remaining output before termination
+        try:
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                print(f"Worker {worker_id}: {line.strip()}")
+        except Exception as e:
+            print(f"Worker {worker_id}: Error reading output before termination - {str(e)}")
+        
         for child in children:
             child.terminate()
         parent.terminate()
 
         gone, alive = psutil.wait_procs(children + [parent], timeout=3)
-        
         for p in alive:
             print(f"Worker {worker_id}: Force killing process {p.pid}")
             p.kill()
@@ -44,11 +58,37 @@ def terminate_process(process, worker_id):
     
     print(f"Worker {worker_id}: Process termination completed")
 
+def continuously_read_output(process, worker_id, silent):
+    set_nonblocking(process.stdout.fileno())
+    output_buffer = []
+    try:
+        while True:
+            time.sleep(0.1)  # Adjust timing based on the expected update frequency
+            try:
+                output = process.stdout.read()
+                if output:
+                    output_buffer.append(output)
+                    if '\n' in output:
+                        full_lines = ''.join(output_buffer).splitlines()
+                        for line in full_lines:
+                            if not silent:
+                                print(f"Worker {worker_id}: {line}")  # Process each line as needed
+                        output_buffer = []
+            except IOError:
+                # Handle expected exception due to no available output
+                pass
+            if process.poll() is not None:
+                # Process has terminated, handle remaining output
+                remaining_output = process.stdout.read()
+                if remaining_output:
+                    print(remaining_output)
+                break
+    finally:
+        if output_buffer:
+            print(''.join(output_buffer))  # Print any remaining output
+
 def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
-    if not silent:
-        print(f"Starting Worker {worker_id}")
-    else:
-        print(f"Worker {worker_id}: Started")
+    print(f"Starting Worker {worker_id}" if not silent else f"Worker {worker_id}: Started")
 
     process = None
     last_output_time = datetime.now()
@@ -58,51 +98,16 @@ def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
             if process is not None:
                 print(f"Worker {worker_id}: Restarting")
                 terminate_process(process, worker_id)
-            process = process = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # Merge stderr with stdout
-                bufsize=1,
-                text=True
-            )
-
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, text=True)
             last_output_time = datetime.now()
 
-        try:
-            ready, _, _ = select.select([process.stdout], [], [], 60.0)
-            if ready:
-                line = process.stdout.readline()
-                if not line:
-                    continue
+        continuously_read_output(process, worker_id, silent)
 
-                if not silent:
-                    print(f"Worker {worker_id}: {line.strip()}")
-                
-                if re.search(restart_pattern, line):
-                    last_output_time = datetime.now()
-            else:
-                if process.poll() is None:
-                    print(f"Worker {worker_id}: No output for 60 seconds. Checking process...")
-                    process.send_signal(signal.SIGURG)
-                    time.sleep(1)
-                    if process.poll() is None:
-                        print(f"Worker {worker_id}: Process is still running but unresponsive. Restarting...")
-                        terminate_process(process, worker_id)
-                        process = None
-                        last_output_time = datetime.now()
-                
-            if datetime.now() - last_output_time > timedelta(minutes=no_output_timeout):
-                print(f"Worker {worker_id}: No output detected for {no_output_timeout} minutes. Restarting...")
-                terminate_process(process, worker_id)
-                process = None
-                last_output_time = datetime.now()
-
-        except Exception as e:
-            print(f"Worker {worker_id}: Error - {str(e)}. Restarting...")
+        if datetime.now() - last_output_time > timedelta(minutes=no_output_timeout):
+            print(f"Worker {worker_id}: No output detected for {no_output_timeout} minutes. Restarting...")
             terminate_process(process, worker_id)
             process = None
-            time.sleep(5)
+            last_output_time = datetime.now()
 
     if process:
         print(f"Worker {worker_id}: Stopping")

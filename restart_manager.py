@@ -7,7 +7,7 @@ import signal
 import select
 import os
 import psutil
-import fcntl
+import io
 from datetime import datetime, timedelta
 
 stop_flag = threading.Event()
@@ -68,24 +68,39 @@ def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
                 universal_newlines=True
             )
 
-            # Set up non-blocking reads for stdout and stderr
-            for pipe in [process.stdout, process.stderr]:
-                fl = fcntl.fcntl(pipe, fcntl.F_GETFL)
-                fcntl.fcntl(pipe, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-
             last_output_time = datetime.now()
 
         try:
             ready, _, _ = select.select([process.stdout, process.stderr], [], [], 1.0)
             if ready:
                 for pipe in ready:
-                    output = pipe.read()
-                    if output:
-                        if not silent:
-                            print(f"Worker {worker_id}: {output}", end='', flush=True)
-                        
-                        if re.search(restart_pattern, output):
-                            last_output_time = datetime.now()
+                    buffer = io.StringIO()
+                    while True:
+                        char = pipe.read(1)
+                        if not char:
+                            break
+                        if char == '\r':
+                            buffer.seek(0)
+                            buffer.truncate()
+                        elif char == '\n':
+                            line = buffer.getvalue()
+                            if not silent:
+                                print(f"Worker {worker_id}: {line}")
+                            if re.search(restart_pattern, line):
+                                last_output_time = datetime.now()
+                            buffer.seek(0)
+                            buffer.truncate()
+                        else:
+                            buffer.write(char)
+                    
+                    # Print any remaining content in the buffer
+                    remaining = buffer.getvalue()
+                    if remaining and not silent:
+                        print(f"Worker {worker_id}: {remaining}", end='', flush=True)
+                    
+                    if buffer.tell() > 0:
+                        last_output_time = datetime.now()
+
             else:
                 if process.poll() is None:
                     if datetime.now() - last_output_time > timedelta(seconds=60):

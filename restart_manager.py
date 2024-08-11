@@ -17,9 +17,12 @@ def process_output(stream, worker_id, log_file, silent):
         buffer = ""
         while True:
             output = stream.read(1)  # Read one character at a time
-            if output == '' and stream.closed:
+            if output == b'' and stream.closed:
                 break
             if output:
+                # Decode bytes to string
+                output = output.decode('utf-8', errors='replace')
+
                 # Handle carriage return (overwrite line)
                 if output == '\r':
                     buffer = ""  # Clear the line buffer on carriage return

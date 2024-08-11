@@ -62,7 +62,7 @@ def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
                 command,
                 shell=True,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # Merge stderr with stdout
+                stderr=subprocess.PIPE,
                 bufsize=1,
                 text=True
             )

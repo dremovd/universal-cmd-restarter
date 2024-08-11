@@ -14,30 +14,25 @@ def process_output(stream, worker_id, log_file, silent):
     and logging the final state of each line.
     """
     with open(log_file, 'w') as log:
-        buffer = ""
         while True:
-            output = stream.read(1)  # Read one character at a time
+            output = stream.read(1024)  # Read 1024 bytes at a time
             if output == b'' and stream.closed:
                 break
             if output:
                 # Decode bytes to string
-                output = output.decode('utf-8', errors='replace')
+                decoded_output = output.decode('utf-8', errors='replace')
+                
+                # Handle carriage returns by splitting on '\r' and keeping only the last part
+                parts = decoded_output.split('\r')
+                buffer = parts[-1].strip()  # This should contain the final state of the line
 
-                # Handle carriage return (overwrite line)
-                if output == '\r':
-                    buffer = ""  # Clear the line buffer on carriage return
-                elif output == '\n':
-                    # When we hit a newline, log and print the current buffer
-                    if buffer:
-                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        log_entry = f"{timestamp} - Worker {worker_id}: {buffer.strip()}\n"
-                        log.write(log_entry)
-                        log.flush()  # Ensure it writes to file immediately
-                        if not silent:
-                            print(log_entry, end='')
-                    buffer = ""  # Clear the buffer after processing a complete line
-                else:
-                    buffer += output  # Accumulate characters into the buffer
+                if buffer:
+                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    log_entry = f"{timestamp} - Worker {worker_id}: {buffer}\n"
+                    log.write(log_entry)
+                    log.flush()  # Ensure it writes to file immediately
+                    if not silent:
+                        print(log_entry, end='')
 
 def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
     log_file = f"worker_{worker_id}_output.log"

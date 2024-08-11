@@ -58,6 +58,8 @@ def terminate_process(process, worker_id):
     
     print(f"Worker {worker_id}: Process termination completed")
 
+import errno
+
 def continuously_read_output(process, worker_id, silent):
     set_nonblocking(process.stdout.fileno())
     output_buffer = []
@@ -66,6 +68,8 @@ def continuously_read_output(process, worker_id, silent):
             time.sleep(0.1)  # Adjust timing based on the expected update frequency
             try:
                 output = process.stdout.read()
+                if output is None:
+                    continue  # No data available yet, skip this loop
                 if output:
                     output_buffer.append(output)
                     if '\n' in output:
@@ -73,10 +77,14 @@ def continuously_read_output(process, worker_id, silent):
                         for line in full_lines:
                             if not silent:
                                 print(f"Worker {worker_id}: {line}")  # Process each line as needed
-                        output_buffer = []
-            except IOError:
-                # Handle expected exception due to no available output
-                pass
+                        output_buffer = []  # Reset buffer after processing full lines
+            except IOError as e:
+                if e.errno != errno.EAGAIN:
+                    raise  # Re-raise the exception if it's not the expected "no data" error
+                # No data to read, skip this iteration
+            except Exception as e:
+                print(f"Error reading output: {e}")
+                
             if process.poll() is not None:
                 # Process has terminated, handle remaining output
                 remaining_output = process.stdout.read()
@@ -86,7 +94,7 @@ def continuously_read_output(process, worker_id, silent):
     finally:
         if output_buffer:
             print(''.join(output_buffer))  # Print any remaining output
-
+       
 def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
     print(f"Starting Worker {worker_id}" if not silent else f"Worker {worker_id}: Started")
 

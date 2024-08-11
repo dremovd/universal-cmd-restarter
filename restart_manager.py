@@ -1,8 +1,10 @@
+import argparse
 import subprocess
-import threading
 import time
+import threading
 import re
 import signal
+import select
 import os
 import psutil
 from datetime import datetime, timedelta
@@ -60,22 +62,28 @@ def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
             last_output_time = datetime.now()
 
         try:
-            while True:
-                output = process.stdout.read(1)  # Read one character at a time
-                if output == '' and process.poll() is not None:
-                    break
-                if output:
+            ready, _, _ = select.select([process.stdout], [], [], 60.0)
+            if ready:
+                line = process.stdout.readline()
+                if not line:
+                    continue
+
+                if not silent:
+                    print(f"Worker {worker_id}: {line.strip()}")
+                
+                if re.search(restart_pattern, line):
                     last_output_time = datetime.now()
-                    print(f"Worker {worker_id}: {output}", end='')  # Print without adding a newline
-
-                    # Reconstruct the line for pattern matching
-                    if output.endswith('\n'):
-                        line = process.stdout.readline().strip()
-                        if not silent:
-                            print(f"Worker {worker_id}: {line}")
-                        if re.search(restart_pattern, line):
-                            print(f"Worker {worker_id}: Pattern matched: {line}")
-
+            else:
+                if process.poll() is None:
+                    print(f"Worker {worker_id}: No output for 60 seconds. Checking process...")
+                    process.send_signal(signal.SIGURG)
+                    time.sleep(1)
+                    if process.poll() is None:
+                        print(f"Worker {worker_id}: Process is still running but unresponsive. Restarting...")
+                        terminate_process(process, worker_id)
+                        process = None
+                        last_output_time = datetime.now()
+                
             if datetime.now() - last_output_time > timedelta(minutes=no_output_timeout):
                 print(f"Worker {worker_id}: No output detected for {no_output_timeout} minutes. Restarting...")
                 terminate_process(process, worker_id)
@@ -97,8 +105,6 @@ def signal_handler(signum, frame):
     stop_flag.set()
 
 def main():
-    import argparse
-
     parser = argparse.ArgumentParser(description="Universal restart manager")
     parser.add_argument("command", help="Command to run in each worker instance")
     parser.add_argument("instances", type=int, help="Number of instances to run in parallel")

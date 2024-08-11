@@ -58,7 +58,15 @@ def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
             if process is not None:
                 print(f"Worker {worker_id}: Restarting")
                 terminate_process(process, worker_id)
-            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, universal_newlines=True)
+            process = process = subprocess.Popen(
+                command,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # Merge stderr with stdout
+                bufsize=1,
+                text=True
+            )
+
             last_output_time = datetime.now()
 
         try:

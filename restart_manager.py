@@ -1,9 +1,9 @@
 import subprocess
 import threading
+import os
 import time
 import re
 import signal
-import os
 import psutil
 from datetime import datetime, timedelta
 
@@ -56,25 +56,21 @@ def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
             if process is not None:
                 print(f"Worker {worker_id}: Restarting")
                 terminate_process(process, worker_id)
-            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, universal_newlines=True)
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, universal_newlines=False)
             last_output_time = datetime.now()
 
         try:
             while True:
-                output = process.stdout.read(1)  # Read one character at a time
-                if output == '' and process.poll() is not None:
+                output = os.read(process.stdout.fileno(), 1024)  # Read 1024 bytes at a time
+                if not output and process.poll() is not None:
                     break
                 if output:
                     last_output_time = datetime.now()
-                    print(f"Worker {worker_id}: {output}", end='')  # Print without adding a newline
+                    decoded_output = output.decode('utf-8', errors='replace')
+                    print(f"Worker {worker_id}: {decoded_output}", end='')  # Print the decoded output
 
-                    # Reconstruct the line for pattern matching
-                    if output.endswith('\n'):
-                        line = process.stdout.readline().strip()
-                        if not silent:
-                            print(f"Worker {worker_id}: {line}")
-                        if re.search(restart_pattern, line):
-                            print(f"Worker {worker_id}: Pattern matched: {line}")
+                    if re.search(restart_pattern, decoded_output):
+                        print(f"Worker {worker_id}: Pattern matched")
 
             if datetime.now() - last_output_time > timedelta(minutes=no_output_timeout):
                 print(f"Worker {worker_id}: No output detected for {no_output_timeout} minutes. Restarting...")

@@ -103,8 +103,8 @@ def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
 
             else:
                 if process.poll() is None:
-                    if datetime.now() - last_output_time > timedelta(seconds=60):
-                        print(f"Worker {worker_id}: No output for 60 seconds. Checking process...")
+                    if datetime.now() - last_output_time > timedelta(seconds=300):
+                        print(f"Worker {worker_id}: No output for 300 seconds. Checking process...")
                         process.send_signal(signal.SIGURG)
                         time.sleep(1)
                         if process.poll() is None:
@@ -139,7 +139,7 @@ def main():
     parser.add_argument("instances", type=int, help="Number of instances to run in parallel")
     parser.add_argument("restart_pattern", help="Regular expression pattern to check for successful execution or heartbeat")
     parser.add_argument("--silent", action="store_true", help="Enable silent mode (only output logs about starting/restarting workers)")
-    parser.add_argument("--no-output-timeout", type=int, default=60, help="Timeout in minutes for no output before restarting")
+    parser.add_argument("--no-output-timeout", type=int, default=5, help="Timeout in minutes for no output before restarting")
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, signal_handler)

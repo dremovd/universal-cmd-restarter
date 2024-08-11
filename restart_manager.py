@@ -1,6 +1,5 @@
 import subprocess
 import threading
-import os
 import time
 import re
 import signal
@@ -8,6 +7,69 @@ import psutil
 from datetime import datetime, timedelta
 
 stop_flag = threading.Event()
+
+def process_output(stream, worker_id, log_file, silent):
+    """
+    Continuously reads from a stream (stdout or stderr), handling special characters
+    and logging the final state of each line.
+    """
+    with open(log_file, 'w') as log:
+        buffer = ""
+        while True:
+            output = stream.read(1)  # Read one character at a time
+            if output == '' and stream.closed:
+                break
+            if output:
+                # Handle carriage return (overwrite line)
+                if output == '\r':
+                    buffer = ""  # Clear the line buffer on carriage return
+                elif output == '\n':
+                    # When we hit a newline, log and print the current buffer
+                    if buffer:
+                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        log_entry = f"{timestamp} - Worker {worker_id}: {buffer.strip()}\n"
+                        log.write(log_entry)
+                        log.flush()  # Ensure it writes to file immediately
+                        if not silent:
+                            print(log_entry, end='')
+                    buffer = ""  # Clear the buffer after processing a complete line
+                else:
+                    buffer += output  # Accumulate characters into the buffer
+
+def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
+    log_file = f"worker_{worker_id}_output.log"
+    process = None
+    last_output_time = datetime.now()
+    
+    while not stop_flag.is_set():
+        if process is None or process.poll() is not None:
+            if process is not None:
+                print(f"Worker {worker_id}: Restarting")
+                terminate_process(process, worker_id)
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=False)
+            last_output_time = datetime.now()
+
+            # Start separate threads for stdout and stderr processing
+            stdout_thread = threading.Thread(target=process_output, args=(process.stdout, worker_id, log_file, silent))
+            stderr_thread = threading.Thread(target=process_output, args=(process.stderr, worker_id, log_file, silent))
+
+            stdout_thread.start()
+            stderr_thread.start()
+
+            stdout_thread.join()
+            stderr_thread.join()
+
+        if datetime.now() - last_output_time > timedelta(minutes=no_output_timeout):
+            print(f"Worker {worker_id}: No output detected for {no_output_timeout} minutes. Restarting...")
+            terminate_process(process, worker_id)
+            process = None
+            last_output_time = datetime.now()
+
+        time.sleep(1)  # Prevent tight loop
+
+    if process:
+        print(f"Worker {worker_id}: Stopping")
+        terminate_process(process, worker_id)
 
 def terminate_process(process, worker_id):
     if process is None:
@@ -42,52 +104,6 @@ def terminate_process(process, worker_id):
     
     print(f"Worker {worker_id}: Process termination completed")
 
-def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
-    if not silent:
-        print(f"Starting Worker {worker_id}")
-    else:
-        print(f"Worker {worker_id}: Started")
-
-    process = None
-    last_output_time = datetime.now()
-    
-    while not stop_flag.is_set():
-        if process is None or process.poll() is not None:
-            if process is not None:
-                print(f"Worker {worker_id}: Restarting")
-                terminate_process(process, worker_id)
-            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, universal_newlines=False)
-            last_output_time = datetime.now()
-
-        try:
-            while True:
-                output = os.read(process.stdout.fileno(), 1024)  # Read 1024 bytes at a time
-                if not output and process.poll() is not None:
-                    break
-                if output:
-                    last_output_time = datetime.now()
-                    decoded_output = output.decode('utf-8', errors='replace')
-                    print(f"Worker {worker_id}: {decoded_output}", end='')  # Print the decoded output
-
-                    if re.search(restart_pattern, decoded_output):
-                        print(f"Worker {worker_id}: Pattern matched")
-
-            if datetime.now() - last_output_time > timedelta(minutes=no_output_timeout):
-                print(f"Worker {worker_id}: No output detected for {no_output_timeout} minutes. Restarting...")
-                terminate_process(process, worker_id)
-                process = None
-                last_output_time = datetime.now()
-
-        except Exception as e:
-            print(f"Worker {worker_id}: Error - {str(e)}. Restarting...")
-            terminate_process(process, worker_id)
-            process = None
-            time.sleep(5)
-
-    if process:
-        print(f"Worker {worker_id}: Stopping")
-        terminate_process(process, worker_id)
-
 def signal_handler(signum, frame):
     print("\nCtrl+C pressed. Stopping all workers...")
     stop_flag.set()
@@ -95,7 +111,7 @@ def signal_handler(signum, frame):
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Universal restart manager")
+    parser = argparse.ArgumentParser(description="Process output handling for terminal-based commands")
     parser.add_argument("command", help="Command to run in each worker instance")
     parser.add_argument("instances", type=int, help="Number of instances to run in parallel")
     parser.add_argument("restart_pattern", help="Regular expression pattern to check for successful execution or heartbeat")
@@ -105,8 +121,7 @@ def main():
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    if not args.silent:
-        print(f"Starting {args.instances} workers")
+    print(f"Starting {args.instances} workers")
 
     threads = []
     for i in range(args.instances):
@@ -118,8 +133,7 @@ def main():
     for thread in threads:
         thread.join()
 
-    if not args.silent:
-        print("All workers have finished")
+    print("All workers have finished")
 
 if __name__ == "__main__":
     main()

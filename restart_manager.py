@@ -7,6 +7,7 @@ import signal
 import select
 import os
 import psutil
+import fcntl
 from datetime import datetime, timedelta
 
 stop_flag = threading.Event()
@@ -58,39 +59,44 @@ def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
             if process is not None:
                 print(f"Worker {worker_id}: Restarting")
                 terminate_process(process, worker_id)
-            process = process = subprocess.Popen(
+            process = subprocess.Popen(
                 command,
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=1,
-                text=True
+                universal_newlines=True
             )
+
+            # Set up non-blocking reads for stdout and stderr
+            for pipe in [process.stdout, process.stderr]:
+                fl = fcntl.fcntl(pipe, fcntl.F_GETFL)
+                fcntl.fcntl(pipe, fcntl.F_SETFL, fl | os.O_NONBLOCK)
 
             last_output_time = datetime.now()
 
         try:
-            ready, _, _ = select.select([process.stdout], [], [], 60.0)
+            ready, _, _ = select.select([process.stdout, process.stderr], [], [], 1.0)
             if ready:
-                line = process.stdout.readline()
-                if not line:
-                    continue
-
-                if not silent:
-                    print(f"Worker {worker_id}: {line.strip()}")
-                
-                if re.search(restart_pattern, line):
-                    last_output_time = datetime.now()
+                for pipe in ready:
+                    output = pipe.read()
+                    if output:
+                        if not silent:
+                            print(f"Worker {worker_id}: {output}", end='', flush=True)
+                        
+                        if re.search(restart_pattern, output):
+                            last_output_time = datetime.now()
             else:
                 if process.poll() is None:
-                    print(f"Worker {worker_id}: No output for 60 seconds. Checking process...")
-                    process.send_signal(signal.SIGURG)
-                    time.sleep(1)
-                    if process.poll() is None:
-                        print(f"Worker {worker_id}: Process is still running but unresponsive. Restarting...")
-                        terminate_process(process, worker_id)
-                        process = None
-                        last_output_time = datetime.now()
+                    if datetime.now() - last_output_time > timedelta(seconds=60):
+                        print(f"Worker {worker_id}: No output for 60 seconds. Checking process...")
+                        process.send_signal(signal.SIGURG)
+                        time.sleep(1)
+                        if process.poll() is None:
+                            print(f"Worker {worker_id}: Process is still running but unresponsive. Restarting...")
+                            terminate_process(process, worker_id)
+                            process = None
+                            last_output_time = datetime.now()
                 
             if datetime.now() - last_output_time > timedelta(minutes=no_output_timeout):
                 print(f"Worker {worker_id}: No output detected for {no_output_timeout} minutes. Restarting...")

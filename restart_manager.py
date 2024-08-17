@@ -4,10 +4,7 @@ import time
 import threading
 import re
 import signal
-import select
 import os
-import psutil
-import io
 from datetime import datetime, timedelta
 
 stop_flag = threading.Event()
@@ -16,34 +13,15 @@ def terminate_process(process, worker_id):
     if process is None:
         return
 
-    print(f"Worker {worker_id}: Forcefully terminating process...")
+    print(f"Worker {worker_id}: Terminating process...")
     try:
-        parent = psutil.Process(process.pid)
-        children = parent.children(recursive=True)
-        
-        for child in children:
-            child.terminate()
-        parent.terminate()
+        process.terminate()
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        print(f"Worker {worker_id}: Force killing process...")
+        process.kill()
 
-        gone, alive = psutil.wait_procs(children + [parent], timeout=3)
-        
-        for p in alive:
-            print(f"Worker {worker_id}: Force killing process {p.pid}")
-            p.kill()
-
-    except psutil.NoSuchProcess:
-        print(f"Worker {worker_id}: Process already terminated")
-    except Exception as e:
-        print(f"Worker {worker_id}: Error while terminating process - {str(e)}")
-    
-    try:
-        os.kill(process.pid, 0)
-        print(f"Worker {worker_id}: Process still exists. Force killing...")
-        os.kill(process.pid, signal.SIGKILL)
-    except OSError:
-        pass
-    
-    print(f"Worker {worker_id}: Process termination completed")
+    print(f"Worker {worker_id}: Process terminated")
 
 def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
     if not silent:
@@ -71,49 +49,15 @@ def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
             last_output_time = datetime.now()
 
         try:
-            ready, _, _ = select.select([process.stdout, process.stderr], [], [], 1.0)
-            if ready:
-                for pipe in ready:
-                    buffer = io.StringIO()
-                    while True:
-                        char = pipe.read(1)
-                        if not char:
-                            break
-                        if char == '\r':
-                            buffer.seek(0)
-                            buffer.truncate()
-                        elif char == '\n':
-                            line = buffer.getvalue()
-                            if not silent:
-                                print(f"Worker {worker_id}: {line}")
-                            if re.search(restart_pattern, line):
-                                last_output_time = datetime.now()
-                            buffer.seek(0)
-                            buffer.truncate()
-                        else:
-                            buffer.write(char)
-                    
-                    # Print any remaining content in the buffer
-                    remaining = buffer.getvalue()
-                    if remaining and not silent:
-                        print(f"Worker {worker_id}: {remaining}", end='', flush=True)
-                    
-                    if buffer.tell() > 0:
-                        last_output_time = datetime.now()
+            output = process.stdout.readline()
+            if output:
+                last_output_time = datetime.now()
+                if not silent:
+                    print(f"Worker {worker_id}: {output.strip()}")
+                if re.search(restart_pattern, output):
+                    last_output_time = datetime.now()
 
-            else:
-                if process.poll() is None:
-                    if datetime.now() - last_output_time > timedelta(seconds=300):
-                        print(f"Worker {worker_id}: No output for 300 seconds. Checking process...")
-                        process.send_signal(signal.SIGURG)
-                        time.sleep(1)
-                        if process.poll() is None:
-                            print(f"Worker {worker_id}: Process is still running but unresponsive. Restarting...")
-                            terminate_process(process, worker_id)
-                            process = None
-                            last_output_time = datetime.now()
-                
-            if datetime.now() - last_output_time > timedelta(minutes=no_output_timeout):
+            elif datetime.now() - last_output_time > timedelta(minutes=no_output_timeout):
                 print(f"Worker {worker_id}: No output detected for {no_output_timeout} minutes. Restarting...")
                 terminate_process(process, worker_id)
                 process = None

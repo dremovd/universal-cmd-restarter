@@ -57,8 +57,8 @@ def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
                 if re.search(restart_pattern, output):
                     last_output_time = datetime.now()
 
-            elif datetime.now() - last_output_time > timedelta(minutes=no_output_timeout):
-                print(f"Worker {worker_id}: No output detected for {no_output_timeout} minutes. Restarting...")
+            elif datetime.now() - last_output_time > timedelta(seconds=no_output_timeout):
+                print(f"Worker {worker_id}: No output detected for {no_output_timeout} seconds. Restarting...")
                 terminate_process(process, worker_id)
                 process = None
                 last_output_time = datetime.now()
@@ -83,7 +83,7 @@ def main():
     parser.add_argument("instances", type=int, help="Number of instances to run in parallel")
     parser.add_argument("restart_pattern", help="Regular expression pattern to check for successful execution or heartbeat")
     parser.add_argument("--silent", action="store_true", help="Enable silent mode (only output logs about starting/restarting workers)")
-    parser.add_argument("--no-output-timeout", type=int, default=5, help="Timeout in minutes for no output before restarting")
+    parser.add_argument("--no-output-timeout", type=int, default=60, help="Timeout in seconds for no output before restarting")
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, signal_handler)

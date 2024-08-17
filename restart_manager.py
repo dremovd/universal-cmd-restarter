@@ -4,7 +4,9 @@ import time
 import threading
 import re
 import signal
+import select
 import os
+import psutil
 from datetime import datetime, timedelta
 
 stop_flag = threading.Event()
@@ -13,61 +15,92 @@ def terminate_process(process, worker_id):
     if process is None:
         return
 
-    print(f"Worker {worker_id}: Terminating process...")
+    print(f"Worker {worker_id}: Forcefully terminating process...")
     try:
-        process.terminate()
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        print(f"Worker {worker_id}: Force killing process...")
-        process.kill()
+        parent = psutil.Process(process.pid)
+        children = parent.children(recursive=True)
+        
+        for child in children:
+            child.terminate()
+        parent.terminate()
 
-    print(f"Worker {worker_id}: Process terminated")
+        gone, alive = psutil.wait_procs(children + [parent], timeout=3)
+        
+        for p in alive:
+            print(f"Worker {worker_id}: Force killing process {p.pid}")
+            p.kill()
 
-def run_worker(command, worker_id, silent, no_output_timeout, restart_pattern):
+    except psutil.NoSuchProcess:
+        print(f"Worker {worker_id}: Process already terminated")
+    except Exception as e:
+        print(f"Worker {worker_id}: Error while terminating process - {str(e)}")
+    
+    # Final check to ensure the process is no longer running
+    try:
+        os.kill(process.pid, 0)
+        print(f"Worker {worker_id}: Process still exists. Force killing...")
+        os.kill(process.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    
+    print(f"Worker {worker_id}: Process termination completed")
+
+def run_worker(command, worker_id, silent, no_inference_timeout, heartbeat_substring):
     if not silent:
         print(f"Starting Worker {worker_id}")
     else:
         print(f"Worker {worker_id}: Started")
 
     process = None
-    last_output_time = datetime.now()
+    last_inference_time = datetime.now()
     
     while not stop_flag.is_set():
         if process is None or process.poll() is not None:
             if process is not None:
                 print(f"Worker {worker_id}: Restarting")
                 terminate_process(process, worker_id)
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=1,
-                universal_newlines=True
-            )
-
-            last_output_time = datetime.now()
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1, universal_newlines=True)
+            last_inference_time = datetime.now()
 
         try:
-            output = process.stdout.readline()
-            if output:
-                last_output_time = datetime.now()
-                if not silent:
-                    print(f"Worker {worker_id}: {output.strip()}")
-                if re.search(restart_pattern, output):
-                    last_output_time = datetime.now()
+            # Use select for non-blocking read with a timeout
+            ready, _, _ = select.select([process.stdout], [], [], 60.0)  # 60-second timeout
+            if ready:
+                line = process.stdout.readline()
+                if not line:
+                    continue
 
-            elif datetime.now() - last_output_time > timedelta(seconds=no_output_timeout):
-                print(f"Worker {worker_id}: No output detected for {no_output_timeout} seconds. Restarting...")
+                if not silent:
+                    print(f"Worker {worker_id}: {line.strip()}")
+                
+                # Check for the heartbeat substring
+                if heartbeat_substring in line:
+                    last_inference_time = datetime.now()
+                
+            else:
+                # No output for 60 seconds, check if process is still responsive
+                if process.poll() is None:
+                    print(f"Worker {worker_id}: No output for 60 seconds. Checking process...")
+                    # Send a signal to the process to check if it's responsive
+                    process.send_signal(signal.SIGURG)
+                    time.sleep(1)
+                    if process.poll() is None:
+                        print(f"Worker {worker_id}: Process is still running but unresponsive. Restarting...")
+                        terminate_process(process, worker_id)
+                        process = None
+                        last_inference_time = datetime.now()
+                
+            if datetime.now() - last_inference_time > timedelta(seconds=no_inference_timeout):
+                print(f"Worker {worker_id}: No inference finished for {no_inference_timeout} seconds. Restarting...")
                 terminate_process(process, worker_id)
                 process = None
-                last_output_time = datetime.now()
+                last_inference_time = datetime.now()
 
         except Exception as e:
             print(f"Worker {worker_id}: Error - {str(e)}. Restarting...")
             terminate_process(process, worker_id)
             process = None
-            time.sleep(5)
+            time.sleep(5)  # Wait a bit before restarting to avoid rapid restarts in case of persistent errors
 
     if process:
         print(f"Worker {worker_id}: Stopping")
@@ -78,12 +111,12 @@ def signal_handler(signum, frame):
     stop_flag.set()
 
 def main():
-    parser = argparse.ArgumentParser(description="Universal restart manager")
-    parser.add_argument("command", help="Command to run in each worker instance")
+    parser = argparse.ArgumentParser(description="Run Kuzco workers in parallel")
+    parser.add_argument("command", help="Kuzco worker command to run")
     parser.add_argument("instances", type=int, help="Number of instances to run in parallel")
-    parser.add_argument("restart_pattern", help="Regular expression pattern to check for successful execution or heartbeat")
     parser.add_argument("--silent", action="store_true", help="Enable silent mode (only output logs about starting/restarting workers)")
-    parser.add_argument("--no-output-timeout", type=int, default=60, help="Timeout in seconds for no output before restarting")
+    parser.add_argument("--no-inference-timeout", type=int, default=60, help="Timeout in seconds for no inference before restarting")
+    parser.add_argument("--heartbeat-substring", type=str, required=True, help="Substring to check in the output for heartbeat")
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -93,10 +126,10 @@ def main():
 
     threads = []
     for i in range(args.instances):
-        thread = threading.Thread(target=run_worker, args=(args.command, i, args.silent, args.no_output_timeout, args.restart_pattern))
+        thread = threading.Thread(target=run_worker, args=(args.command, i, args.silent, args.no_inference_timeout, args.heartbeat_substring))
         thread.start()
         threads.append(thread)
-        time.sleep(1)
+        time.sleep(1)  # 1-second pause between starting each worker
 
     for thread in threads:
         thread.join()
